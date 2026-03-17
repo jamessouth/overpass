@@ -197,21 +197,6 @@ clip() {
 	echo "Copied $2 to clipboard. Will clear in $CLIP_TIME seconds."
 }
 
-qrcode() {
-	if [[ -n $DISPLAY || -n $WAYLAND_DISPLAY ]]; then
-		if type feh >/dev/null 2>&1; then
-			echo -n "$1" | qrencode --size 10 -o - | feh -x --title "pass: $2" -g +200+200 -
-			return
-		elif type gm >/dev/null 2>&1; then
-			echo -n "$1" | qrencode --size 10 -o - | gm display -title "pass: $2" -geometry +200+200 -
-			return
-		elif type display >/dev/null 2>&1; then
-			echo -n "$1" | qrencode --size 10 -o - | display -title "pass: $2" -geometry +200+200 -
-			return
-		fi
-	fi
-	echo -n "$1" | qrencode -t utf8
-}
 
 tmpdir() {
 	[[ -n $SECURE_TMPDIR ]] && return
@@ -366,35 +351,30 @@ cmd_init() {
 }
 
 cmd_show() {
-	local opts selected_line clip=0 qrcode=0
-	opts="$($GETOPT -o q::c:: -l qrcode::,clip:: -n "$PROGRAM" -- "$@")"
+	local opts selected_line clip=0 
+	opts="$($GETOPT -o c:: -l clip:: -n "$PROGRAM" -- "$@")"
 	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
-		-q|--qrcode) qrcode=1; selected_line="${2:-1}"; shift 2 ;;
 		-c|--clip) clip=1; selected_line="${2:-1}"; shift 2 ;;
 		--) shift; break ;;
 	esac done
 
-	[[ $err -ne 0 || ( $qrcode -eq 1 && $clip -eq 1 ) ]] && die "Usage: $PROGRAM $COMMAND [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [pass-name]"
+	[[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [--clip[=line-number],-c[line-number]] [pass-name]"
 
 	local pass
 	local path="$1"
 	local passfile="$PREFIX/$path.gpg"
 	check_sneaky_paths "$path"
 	if [[ -f $passfile ]]; then
-		if [[ $clip -eq 0 && $qrcode -eq 0 ]]; then
-			pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | $BASE64)" || exit $?
-			echo "$pass" | $BASE64 -d
+		if [[ $clip -eq 0 ]]; then
+		    pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | $BASE64)" || exit $?
+		    echo "$pass" | $BASE64 -d
 		else
-			[[ $selected_line =~ ^[0-9]+$ ]] || die "Clip location '$selected_line' is not a number."
-			pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
-			[[ -n $pass ]] || die "There is no password to put on the clipboard at line ${selected_line}."
-			if [[ $clip -eq 1 ]]; then
-				clip "$pass" "$path"
-			elif [[ $qrcode -eq 1 ]]; then
-				qrcode "$pass" "$path"
-			fi
+		    [[ $selected_line =~ ^[0-9]+$ ]] || die "Clip location '$selected_line' is not a number."
+		    pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
+		    [[ -n $pass ]] || die "There is no password at line ${selected_line}."
+		    clip "$pass" "$path"
 		fi
 	elif [[ -d $PREFIX/$path ]]; then
 		if [[ -z $path ]]; then
@@ -510,20 +490,19 @@ cmd_edit() {
 }
 
 cmd_generate() {
-	local opts qrcode=0 clip=0 force=0 characters="$CHARACTER_SET" inplace=0 pass
-	opts="$($GETOPT -o nqcif -l no-symbols,qrcode,clip,in-place,force -n "$PROGRAM" -- "$@")"
+	local opts clip=0 force=0 characters="$CHARACTER_SET" inplace=0 pass
+	opts="$($GETOPT -o ncif -l no-symbols,clip,in-place,force -n "$PROGRAM" -- "$@")"
 	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
 		-n|--no-symbols) characters="$CHARACTER_SET_NO_SYMBOLS"; shift ;;
-		-q|--qrcode) qrcode=1; shift ;;
 		-c|--clip) clip=1; shift ;;
 		-f|--force) force=1; shift ;;
 		-i|--in-place) inplace=1; shift ;;
 		--) shift; break ;;
 	esac done
 
-	[[ $err -ne 0 || ( $# -ne 2 && $# -ne 1 ) || ( $force -eq 1 && $inplace -eq 1 ) || ( $qrcode -eq 1 && $clip -eq 1 ) ]] && die "Usage: $PROGRAM $COMMAND [--no-symbols,-n] [--clip,-c] [--qrcode,-q] [--in-place,-i | --force,-f] pass-name [pass-length]"
+	[[ $err -ne 0 || ( $# -ne 2 && $# -ne 1 ) || ( $force -eq 1 && $inplace -eq 1 ) ]] && die "Usage: $PROGRAM $COMMAND [--no-symbols,-n] [--clip,-c] [--in-place,-i | --force,-f] pass-name [pass-length]"
 	local path="$1"
 	local length="${2:-$GENERATED_LENGTH}"
 	check_sneaky_paths "$path"
@@ -555,8 +534,6 @@ cmd_generate() {
 
 	if [[ $clip -eq 1 ]]; then
 		clip "$pass" "$path"
-	elif [[ $qrcode -eq 1 ]]; then
-		qrcode "$pass" "$path"
 	else
 		printf "\e[1mThe generated password for \e[4m%s\e[24m is:\e[0m\n\e[1m\e[93m%s\e[0m\n" "$path" "$pass"
 	fi

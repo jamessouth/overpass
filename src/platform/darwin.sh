@@ -31,14 +31,6 @@ tmpdir() {
 	mount -t hfs -o noatime -o nobrowse "$DARWIN_RAMDISK_DEV" "$SECURE_TMPDIR" || die "Error: could not mount filesystem on ramdisk."
 }
 
-qrcode() {
-	if type imgcat >/dev/null 2>&1; then
-		echo -n "$1" | qrencode --size 10 -o - | imgcat
-	else
-		echo -n "$1" | qrencode -t utf8
-	fi
-}
-
 GETOPT="$({ test -x /usr/local/opt/gnu-getopt/bin/getopt && echo /usr/local/opt/gnu-getopt; } || brew --prefix gnu-getopt 2>/dev/null || { command -v port &>/dev/null && echo /opt/local; } || echo /usr/local)/bin/getopt"
 SHRED="srm -f -z"
 BASE64="openssl base64"
