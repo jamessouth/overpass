@@ -13,7 +13,6 @@ command -v gpg2 &>/dev/null && GPG="gpg2"
 [[ -n $GPG_AGENT_INFO || $GPG == "gpg2" ]] && GPG_OPTS+=( "--batch" "--use-agent" )
 
 PREFIX="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
-EXTENSIONS="${PASSWORD_STORE_EXTENSIONS_DIR:-$PREFIX/.extensions}"
 X_SELECTION="${PASSWORD_STORE_X_SELECTION:-clipboard}"
 CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
 GENERATED_LENGTH="${PASSWORD_STORE_GENERATED_LENGTH:-25}"
@@ -28,11 +27,11 @@ export GIT_CEILING_DIRECTORIES="$PREFIX/.."
 #
 
 set_git() {
-	INNER_GIT_DIR="${1%/*}"
-	while [[ ! -d $INNER_GIT_DIR && ${INNER_GIT_DIR%/*}/ == "${PREFIX%/}/"* ]]; do
-		INNER_GIT_DIR="${INNER_GIT_DIR%/*}"
-	done
-	[[ $(git -C "$INNER_GIT_DIR" rev-parse --is-inside-work-tree 2>/dev/null) == true ]] || INNER_GIT_DIR=""
+    if [[ $(git -C "$PREFIX" rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
+        INNER_GIT_DIR="$PREFIX"
+    else
+        INNER_GIT_DIR=""
+    fi
 }
 git_add_file() {
 	[[ -n $INNER_GIT_DIR ]] || return
@@ -55,17 +54,6 @@ yesno() {
 die() {
 	echo "$@" >&2
 	exit 1
-}
-verify_file() {
-	[[ -n $PASSWORD_STORE_SIGNING_KEY ]] || return 0
-	[[ -f $1.sig ]] || die "Signature for $1 does not exist."
-	local fingerprints="$($GPG $PASSWORD_STORE_GPG_OPTS --verify --status-fd=1 "$1.sig" "$1" 2>/dev/null | sed -n 's/^\[GNUPG:\] VALIDSIG \([A-F0-9]\{40\}\) .* \([A-F0-9]\{40\}\)$/\1\n\2/p')"
-	local fingerprint found=0
-	for fingerprint in $PASSWORD_STORE_SIGNING_KEY; do
-		[[ $fingerprint =~ ^[A-F0-9]{40}$ ]] || continue
-		[[ $fingerprints == *$fingerprint* ]] && { found=1; break; }
-	done
-	[[ $found -eq 1 ]] || die "Signature for $1 is invalid."
 }
 set_gpg_recipients() {
 	GPG_RECIPIENT_ARGS=( )
@@ -97,7 +85,6 @@ set_gpg_recipients() {
 		exit 1
 	fi
 
-	verify_file "$current"
 
 	while read -r gpg_id; do
 		gpg_id="${gpg_id%%#*}" # strip comment
@@ -137,7 +124,7 @@ reencrypt_path() {
 			mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
 		fi
 		prev_gpg_recipients="${GPG_RECIPIENTS[*]}"
-	done < <(find "$1" -path '*/.git' -prune -o -path '*/.extensions' -prune -o -iname '*.gpg' -print0)
+	done < <(find "$1" -path '*/.git' -prune -o -iname '*.gpg' -print0)
 }
 check_sneaky_paths() {
 	local path
@@ -334,16 +321,6 @@ cmd_init() {
 		local id_print="$(printf "%s, " "$@")"
 		echo "Password store initialized for ${id_print%, }${id_path:+ ($id_path)}"
 		git_add_file "$gpg_id" "Set GPG id to ${id_print%, }${id_path:+ ($id_path)}."
-		if [[ -n $PASSWORD_STORE_SIGNING_KEY ]]; then
-			local signing_keys=( ) key
-			for key in $PASSWORD_STORE_SIGNING_KEY; do
-				signing_keys+=( --default-key $key )
-			done
-			$GPG "${GPG_OPTS[@]}" "${signing_keys[@]}" --detach-sign "$gpg_id" || die "Could not sign .gpg_id."
-			key="$($GPG "${GPG_OPTS[@]}" --verify --status-fd=1 "$gpg_id.sig" "$gpg_id" 2>/dev/null | sed -n 's/^\[GNUPG:\] VALIDSIG [A-F0-9]\{40\} .* \([A-F0-9]\{40\}\)$/\1/p')"
-			[[ -n $key ]] || die "Signing of .gpg_id unsuccessful."
-			git_add_file "$gpg_id.sig" "Signing new GPG id with ${key//[$IFS]/,}."
-		fi
 	fi
 
 	reencrypt_path "$PREFIX/$id_path"
@@ -410,7 +387,7 @@ cmd_grep() {
 		passfile="${passfile##*/}"
 		printf "\e[94m%s\e[1m%s\e[0m:\n" "$passfile_dir" "$passfile"
 		echo "$grepresults"
-	done < <(find -L "$PREFIX" -path '*/.git' -prune -o -path '*/.extensions' -prune -o -iname '*.gpg' -print0)
+	done < <(find -L "$PREFIX" -path '*/.git' -prune -o -iname '*.gpg' -print0)
 }
 
 cmd_insert() {
@@ -571,61 +548,6 @@ cmd_delete() {
 	rmdir -p "${passfile%/*}" 2>/dev/null
 }
 
-cmd_copy_move() {
-	local opts move=1 force=0
-	[[ $1 == "copy" ]] && move=0
-	shift
-	opts="$($GETOPT -o f -l force -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-f|--force) force=1; shift ;;
-		--) shift; break ;;
-	esac done
-	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] old-path new-path"
-	check_sneaky_paths "$@"
-	local old_path="$PREFIX/${1%/}"
-	local old_dir="$old_path"
-	local new_path="$PREFIX/$2"
-
-	if ! [[ -f $old_path.gpg && -d $old_path && $1 == */ || ! -f $old_path.gpg ]]; then
-		old_dir="${old_path%/*}"
-		old_path="${old_path}.gpg"
-	fi
-	echo "$old_path"
-	[[ -e $old_path ]] || die "Error: $1 is not in the password store."
-
-	mkdir -p -v "${new_path%/*}"
-	[[ -d $old_path || -d $new_path || $new_path == */ ]] || new_path="${new_path}.gpg"
-
-	local interactive="-i"
-	[[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
-
-	set_git "$new_path"
-	if [[ $move -eq 1 ]]; then
-		mv $interactive -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
-
-		set_git "$new_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$new_path"
-			git_add_file "$new_path" "Rename ${1} to ${2}."
-		fi
-		set_git "$old_path"
-		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-			set_git "$old_path"
-			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
-		fi
-		rmdir -p "$old_dir" 2>/dev/null
-	else
-		cp $interactive -r -v "$old_path" "$new_path" || exit 1
-		[[ -e "$new_path" ]] && reencrypt_path "$new_path"
-		git_add_file "$new_path" "Copy ${1} to ${2}."
-	fi
-}
-
 cmd_git() {
 	set_git "$PREFIX/"
 	if [[ $1 == "init" ]]; then
@@ -646,38 +568,14 @@ cmd_git() {
 	fi
 }
 
-cmd_extension_or_show() {
-	if ! cmd_extension "$@"; then
-		COMMAND="show"
-		cmd_show "$@"
-	fi
-}
 
-SYSTEM_EXTENSION_DIR=""
-cmd_extension() {
-	check_sneaky_paths "$1"
-	local user_extension system_extension extension
-	[[ -n $SYSTEM_EXTENSION_DIR ]] && system_extension="$SYSTEM_EXTENSION_DIR/$1.bash"
-	[[ $PASSWORD_STORE_ENABLE_EXTENSIONS == true ]] && user_extension="$EXTENSIONS/$1.bash"
-	if [[ -n $user_extension && -f $user_extension && -x $user_extension ]]; then
-		verify_file "$user_extension"
-		extension="$user_extension"
-	elif [[ -n $system_extension && -f $system_extension && -x $system_extension ]]; then
-		extension="$system_extension"
-	else
-		return 1
-	fi
-	shift
-	source "$extension" "$@"
-	return 0
-}
 
 #
 # END subcommand functions
 #
 
 PROGRAM="${0##*/}"
-COMMAND="$1"
+COMMAND="${1:-show}"
 
 case "$1" in
 	init) shift;			cmd_init "$@" ;;
@@ -690,9 +588,7 @@ case "$1" in
 	edit) shift;			cmd_edit "$@" ;;
 	generate) shift;		cmd_generate "$@" ;;
 	delete|rm|remove) shift;	cmd_delete "$@" ;;
-	rename|mv) shift;		cmd_copy_move "move" "$@" ;;
-	copy|cp) shift;			cmd_copy_move "copy" "$@" ;;
 	git) shift;			cmd_git "$@" ;;
-	*)				cmd_extension_or_show "$@" ;;
+	*)				cmd_show "$@" ;;
 esac
 exit 0

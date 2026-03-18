@@ -1,2 +1,6 @@
 
-remove qrcode function and qrencode dependency
+remove qrcode() and qrencode dependency
+
+remove directory traversal from set_git function, due to flat structure
+
+remove verify_file(), $PASSWORD_STORE_SIGNING_KEY, cmd_extension(), $PASSWORD_STORE_ENABLE_EXTENSIONS, $PASSWORD_STORE_EXTENSIONS_DIR, cmd_extension_or_show(), cmd_copy_move(),
