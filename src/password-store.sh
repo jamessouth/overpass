@@ -60,30 +60,12 @@ set_gpg_recipients() {
 	GPG_RECIPIENTS=( )
 	local gpg_id
 
-	if [[ -n $PASSWORD_STORE_KEY ]]; then
-		for gpg_id in $PASSWORD_STORE_KEY; do
-			GPG_RECIPIENT_ARGS+=( "-r" "$gpg_id" )
-			GPG_RECIPIENTS+=( "$gpg_id" )
-		done
-		return
+	local current="$PREFIX/.gpg-id"
+
+	if [[ ! -f "$current" ]]; then
+		die "Error: You must run '$PROGRAM init' before you may use the password store."
 	fi
 
-	local current="$PREFIX/$1"
-	while [[ $current != "$PREFIX" && ! -f $current/.gpg-id ]]; do
-		current="${current%/*}"
-	done
-	current="$current/.gpg-id"
-
-	if [[ ! -f $current ]]; then
-		cat >&2 <<-_EOF
-		Error: You must run:
-		    $PROGRAM init your-gpg-id
-		before you may use the password store.
-
-		_EOF
-		cmd_usage
-		exit 1
-	fi
 
 
 	while read -r gpg_id; do
