@@ -19,6 +19,19 @@ GENERATED_LENGTH="${PASSWORD_STORE_GENERATED_LENGTH:-25}"
 CHARACTER_SET="${PASSWORD_STORE_CHARACTER_SET:-[:punct:][:alnum:]}"
 CHARACTER_SET_NO_SYMBOLS="${PASSWORD_STORE_CHARACTER_SET_NO_SYMBOLS:-[:alnum:]}"
 
+
+
+
+
+GPG_ID_FILE="$PREFIX/.gpg-id"
+[[ -f "$GPG_ID_FILE" ]] || die "Error: Store not initialized. Run 'pass init <gpg-id>'."
+GPG_RECIPIENT=$(head -n 1 "$GPG_ID_FILE")
+
+
+
+
+
+
 unset GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_INDEX_FILE GIT_INDEX_VERSION GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 export GIT_CEILING_DIRECTORIES="$PREFIX/.."
 
@@ -54,59 +67,6 @@ yesno() {
 die() {
 	echo "$@" >&2
 	exit 1
-}
-set_gpg_recipients() {
-	GPG_RECIPIENT_ARGS=( )
-	GPG_RECIPIENTS=( )
-	local gpg_id
-
-	local current="$PREFIX/.gpg-id"
-
-	if [[ ! -f "$current" ]]; then
-		die "Error: You must run '$PROGRAM init' before you may use the password store."
-	fi
-
-
-
-	while read -r gpg_id; do
-		gpg_id="${gpg_id%%#*}" # strip comment
-		[[ -n $gpg_id ]] || continue
-		GPG_RECIPIENT_ARGS+=( "-r" "$gpg_id" )
-		GPG_RECIPIENTS+=( "$gpg_id" )
-	done < "$current"
-}
-
-reencrypt_path() {
-	local prev_gpg_recipients="" gpg_keys="" current_keys="" index passfile
-	local groups="$($GPG $PASSWORD_STORE_GPG_OPTS --list-config --with-colons | grep "^cfg:group:.*")"
-	while read -r -d "" passfile; do
-		[[ -L $passfile ]] && continue
-		local passfile_dir="${passfile%/*}"
-		passfile_dir="${passfile_dir#$PREFIX}"
-		passfile_dir="${passfile_dir#/}"
-		local passfile_display="${passfile#$PREFIX/}"
-		passfile_display="${passfile_display%.gpg}"
-		local passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
-
-		set_gpg_recipients "$passfile_dir"
-		if [[ $prev_gpg_recipients != "${GPG_RECIPIENTS[*]}" ]]; then
-			for index in "${!GPG_RECIPIENTS[@]}"; do
-				local group="$(sed -n "s/^cfg:group:$(sed 's/[\/&]/\\&/g' <<<"${GPG_RECIPIENTS[$index]}"):\\(.*\\)\$/\\1/p" <<<"$groups" | head -n 1)"
-				[[ -z $group ]] && continue
-				IFS=";" eval 'GPG_RECIPIENTS+=( $group )' # http://unix.stackexchange.com/a/92190
-				unset "GPG_RECIPIENTS[$index]"
-			done
-			gpg_keys="$($GPG $PASSWORD_STORE_GPG_OPTS --list-keys --with-colons "${GPG_RECIPIENTS[@]}" | sed -n 's/^sub:[^idr:]*:[^:]*:[^:]*:\([^:]*\):[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[a-zA-Z]*e[a-zA-Z]*:.*/\1/p' | LC_ALL=C sort -u)"
-		fi
-		current_keys="$(LC_ALL=C $GPG $PASSWORD_STORE_GPG_OPTS -v --no-secmem-warning --no-permission-warning --decrypt --list-only --keyid-format long "$passfile" 2>&1 | sed -nE 's/^gpg: public key is ([A-F0-9]+)$/\1/p' | LC_ALL=C sort -u)"
-
-		if [[ $gpg_keys != "$current_keys" ]]; then
-			echo "$passfile_display: reencrypting to ${gpg_keys//$'\n'/ }"
-			$GPG -d "${GPG_OPTS[@]}" "$passfile" | $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile_temp" "${GPG_OPTS[@]}" &&
-			mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
-		fi
-		prev_gpg_recipients="${GPG_RECIPIENTS[*]}"
-	done < <(find "$1" -path '*/.git' -prune -o -iname '*.gpg' -print0)
 }
 check_sneaky_paths() {
 	local path
@@ -200,7 +160,6 @@ GETOPT="getopt"
 SHRED="shred -f -z"
 BASE64="base64"
 
-source "$(dirname "$0")/platform/$(uname | cut -d _ -f 1 | tr '[:upper:]' '[:lower:]').sh" 2>/dev/null # PLATFORM_FUNCTION_FILE
 
 #
 # END platform definable
@@ -305,9 +264,51 @@ cmd_init() {
 		git_add_file "$gpg_id" "Set GPG id to ${id_print%, }${id_path:+ ($id_path)}."
 	fi
 
-	reencrypt_path "$PREFIX/$id_path"
 	git_add_file "$PREFIX/$id_path" "Reencrypt password store using new GPG id ${id_print%, }${id_path:+ ($id_path)}."
 }
+
+
+
+
+
+
+cmd_init() {
+    [[ $# -ne 1 ]] && die "Usage: $PROGRAM init <gpg-id>"
+    
+    local new_key="$1"
+    local gpg_id_file="$PREFIX/.gpg-id"
+
+    # 1. Setup the directory and ID file
+    mkdir -p "$PREFIX"
+    echo "$new_key" > "$gpg_id_file"
+    echo "Password store initialized for $new_key"
+
+    set_git
+    git_add_file "$gpg_id_file" "Set GPG id to $new_key."
+
+    # 2. Inline Re-encryption (Replaces reencrypt_path)
+    # If there are existing files, re-encrypt them to the new key.
+    # We use nullglob so the loop doesn't fail if the store is completely empty.
+    shopt -s nullglob
+    for passfile in "$PREFIX"/*.gpg; do
+        local tmp_data
+        echo "Re-encrypting $(basename "$passfile")..."
+        
+        # Decrypt with whatever key it currently has, re-encrypt with the new key
+        if tmp_data=$($GPG -d "${GPG_OPTS[@]}" "$passfile" 2>/dev/null); then
+            echo "$tmp_data" | $GPG -e -r "$new_key" -o "$passfile.tmp" "${GPG_OPTS[@]}" && mv -f "$passfile.tmp" "$passfile"
+        else
+            echo "Warning: Could not re-encrypt $passfile. Skipping."
+        fi
+    done
+    shopt -u nullglob
+
+    # 3. Commit the newly re-encrypted files
+    git_add_file "$PREFIX" "Reencrypt password store using new GPG id $new_key."
+}
+
+
+
 
 cmd_show() {
 	local opts selected_line clip=0 
@@ -393,7 +394,6 @@ cmd_insert() {
 	[[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
 
 	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-	set_gpg_recipients "$(dirname -- "$path")"
 
 	if [[ $multiline -eq 1 ]]; then
 		echo "Enter contents of $path and press Ctrl+D when finished:"
@@ -427,7 +427,6 @@ cmd_edit() {
 	local path="${1%/}"
 	check_sneaky_paths "$path"
 	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-	set_gpg_recipients "$(dirname -- "$path")"
 	local passfile="$PREFIX/$path.gpg"
 	set_git "$passfile"
 
@@ -468,7 +467,6 @@ cmd_generate() {
 	[[ $length =~ ^[0-9]+$ ]] || die "Error: pass-length \"$length\" must be a number."
 	[[ $length -gt 0 ]] || die "Error: pass-length must be greater than zero."
 	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-	set_gpg_recipients "$(dirname -- "$path")"
 	local passfile="$PREFIX/$path.gpg"
 	set_git "$passfile"
 
