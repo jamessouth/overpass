@@ -9,7 +9,7 @@ remove PASSWORD_STORE_KEY
 
 remove set_gpg_recipients(), reencrypt_path(), non-linux platform support
 
-
+remove cmd_grep()
 
 
 

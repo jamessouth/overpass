@@ -271,40 +271,26 @@ cmd_init() {
 
 
 
-
 cmd_init() {
     [[ $# -ne 1 ]] && die "Usage: $PROGRAM init <gpg-id>"
-    
     local new_key="$1"
     local gpg_id_file="$PREFIX/.gpg-id"
 
-    # 1. Setup the directory and ID file
+    # Guard: Don't accidentally overwrite an existing setup if you want to be safe
+    if [[ -f "$gpg_id_file" ]]; then
+        die "Error: Password store already initialized. Manually edit .gpg-id to change keys."
+    fi
+
     mkdir -p "$PREFIX"
     echo "$new_key" > "$gpg_id_file"
-    echo "Password store initialized for $new_key"
-
+    
     set_git
-    git_add_file "$gpg_id_file" "Set GPG id to $new_key."
-
-    # 2. Inline Re-encryption (Replaces reencrypt_path)
-    # If there are existing files, re-encrypt them to the new key.
-    # We use nullglob so the loop doesn't fail if the store is completely empty.
-    shopt -s nullglob
-    for passfile in "$PREFIX"/*.gpg; do
-        local tmp_data
-        echo "Re-encrypting $(basename "$passfile")..."
-        
-        # Decrypt with whatever key it currently has, re-encrypt with the new key
-        if tmp_data=$($GPG -d "${GPG_OPTS[@]}" "$passfile" 2>/dev/null); then
-            echo "$tmp_data" | $GPG -e -r "$new_key" -o "$passfile.tmp" "${GPG_OPTS[@]}" && mv -f "$passfile.tmp" "$passfile"
-        else
-            echo "Warning: Could not re-encrypt $passfile. Skipping."
-        fi
-    done
-    shopt -u nullglob
-
-    # 3. Commit the newly re-encrypted files
-    git_add_file "$PREFIX" "Reencrypt password store using new GPG id $new_key."
+    if [[ -n $INNER_GIT_DIR ]]; then
+        git -C "$INNER_GIT_DIR" add "$gpg_id_file"
+        git_commit "Initialize password store with GPG ID $new_key"
+    fi
+    
+    echo "Password store initialized for $new_key"
 }
 
 
@@ -350,6 +336,74 @@ cmd_show() {
 	fi
 }
 
+
+cmd_show_aliases() {
+    local map_file="$PREFIX/$MAP_NAME.gpg"
+    if [[ -f "$map_file" ]]; then
+        echo "Password Store (Mapped Aliases):"
+        # Decrypt the map, extract just the alias (the part before the colon)
+        $GPG "${GPG_OPTS[@]}" -d "$map_file" 2>/dev/null | cut -d':' -f1 | sort | sed 's/^/├── /'
+    else
+        echo "Password Store (No map found):"
+        # Fallback to just listing the .gpg files if no map exists
+        find "$PREFIX" -maxdepth 1 -name "*.gpg" -not -name "$MAP_NAME.gpg" | sed "s|^$PREFIX/||; s|\.gpg$||"
+    fi
+}
+
+
+
+cmd_show() {
+	local opts clip=0
+	# Removed q:: and c:: (optional line numbers), now it's just a simple toggle
+	opts="$($GETOPT -o c -l clip -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-c|--clip) clip=1; shift ;;
+		--) shift; break ;;
+	esac done
+
+	[[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [--clip,-c] [pass-name]"
+
+	local path="$1"
+	
+	# If no alias is provided, list the mapped aliases
+	if [[ -z "$path" ]]; then
+		cmd_show_aliases # Calls the ls function we drafted earlier
+		return 0
+	fi
+
+	check_sneaky_paths "$path"
+
+	# Translate the human-readable alias to the obfuscated filename
+	local filename=$(get_filename_from_alias "$path")
+	
+	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
+
+	local passfile="$PREFIX/$filename.gpg"
+
+	if [[ -f "$passfile" ]]; then
+		if [[ $clip -eq 0 ]]; then
+			# Output the entire decrypted file directly to the terminal
+			$GPG -d "${GPG_OPTS[@]}" "$passfile" || exit $?
+		else
+			# Extract only the first line for the clipboard
+			local pass
+			pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | head -n 1)" || exit $?
+			[[ -n "$pass" ]] || die "There is no password to put on the clipboard."
+			clip "$pass" "$path"
+		fi
+	else
+		# Failsafe in case the map has an entry but the file was manually deleted
+		die "Error: $path mapped to $filename.gpg, but the file is missing."
+	fi
+}
+
+
+
+
+
+
 cmd_find() {
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
 	IFS="," eval 'echo "Search Terms: $*"'
@@ -357,21 +411,31 @@ cmd_find() {
 	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" 3>&- | tail -n +2 | sed -E 's/\.gpg(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
 }
 
-cmd_grep() {
-	[[ $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [GREPOPTIONS] search-string"
-	local passfile grepresults
-	while read -r -d "" passfile; do
-		grepresults="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | grep --color=always "$@")"
-		[[ $? -ne 0 ]] && continue
-		passfile="${passfile%.gpg}"
-		passfile="${passfile#$PREFIX/}"
-		local passfile_dir="${passfile%/*}/"
-		[[ $passfile_dir == "${passfile}/" ]] && passfile_dir=""
-		passfile="${passfile##*/}"
-		printf "\e[94m%s\e[1m%s\e[0m:\n" "$passfile_dir" "$passfile"
-		echo "$grepresults"
-	done < <(find -L "$PREFIX" -path '*/.git' -prune -o -iname '*.gpg' -print0)
+
+
+
+cmd_find() {
+	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find pass-names..."
+	
+	local map_file="$PREFIX/$MAP_NAME.gpg"
+	[[ ! -f "$map_file" ]] && die "Error: Password store map is empty or missing."
+
+	# Print the search terms nicely, like the original
+	IFS="," eval 'echo "Search Terms: $*"'
+
+	# Build a regex pattern from the arguments (e.g., "term1|term2|term3")
+	local IFS="|"
+	local pattern="$*"
+
+	echo "Matching Aliases:"
+	# Decrypt the map, search case-insensitively for the terms, grab just the alias, and format it
+	$GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
+
+
+
+
+
 
 cmd_insert() {
 	local opts multiline=0 noecho=1 force=0
