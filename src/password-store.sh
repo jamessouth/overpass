@@ -231,42 +231,6 @@ cmd_usage() {
 	_EOF
 }
 
-cmd_init() {
-	local opts id_path=""
-	opts="$($GETOPT -o p: -l path: -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-p|--path) id_path="$2"; shift 2 ;;
-		--) shift; break ;;
-	esac done
-
-	[[ $err -ne 0 || $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [--path=subfolder,-p subfolder] gpg-id..."
-	[[ -n $id_path ]] && check_sneaky_paths "$id_path"
-	[[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
-
-	local gpg_id="$PREFIX/$id_path/.gpg-id"
-	set_git "$gpg_id"
-
-	if [[ $# -eq 1 && -z $1 ]]; then
-		[[ ! -f "$gpg_id" ]] && die "Error: $gpg_id does not exist and so cannot be removed."
-		rm -v -f "$gpg_id" || exit 1
-		if [[ -n $INNER_GIT_DIR ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$gpg_id"
-			git_commit "Deinitialize ${gpg_id}${id_path:+ ($id_path)}."
-		fi
-		rmdir -p "${gpg_id%/*}" 2>/dev/null
-	else
-		mkdir -v -p "$PREFIX/$id_path"
-		printf "%s\n" "$@" > "$gpg_id"
-		local id_print="$(printf "%s, " "$@")"
-		echo "Password store initialized for ${id_print%, }${id_path:+ ($id_path)}"
-		git_add_file "$gpg_id" "Set GPG id to ${id_print%, }${id_path:+ ($id_path)}."
-	fi
-
-	git_add_file "$PREFIX/$id_path" "Reencrypt password store using new GPG id ${id_print%, }${id_path:+ ($id_path)}."
-}
-
 
 
 
@@ -295,46 +259,6 @@ cmd_init() {
 
 
 
-
-cmd_show() {
-	local opts selected_line clip=0 
-	opts="$($GETOPT -o c:: -l clip:: -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-c|--clip) clip=1; selected_line="${2:-1}"; shift 2 ;;
-		--) shift; break ;;
-	esac done
-
-	[[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [--clip[=line-number],-c[line-number]] [pass-name]"
-
-	local pass
-	local path="$1"
-	local passfile="$PREFIX/$path.gpg"
-	check_sneaky_paths "$path"
-	if [[ -f $passfile ]]; then
-		if [[ $clip -eq 0 ]]; then
-		    pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | $BASE64)" || exit $?
-		    echo "$pass" | $BASE64 -d
-		else
-		    [[ $selected_line =~ ^[0-9]+$ ]] || die "Clip location '$selected_line' is not a number."
-		    pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
-		    [[ -n $pass ]] || die "There is no password at line ${selected_line}."
-		    clip "$pass" "$path"
-		fi
-	elif [[ -d $PREFIX/$path ]]; then
-		if [[ -z $path ]]; then
-			echo "Password Store"
-		else
-			echo "${path%\/}"
-		fi
-		tree -N -C -l --noreport "$PREFIX/$path" 3>&- | tail -n +2 | sed -E 's/\.gpg(\x1B\[[0-9]+m)?( ->|$)/\1\2/g' # remove .gpg at end of line, but keep colors
-	elif [[ -z $path ]]; then
-		die "Error: password store is empty. Try \"pass init\"."
-	else
-		die "Error: $path is not in the password store."
-	fi
-}
 
 
 cmd_show_aliases() {
@@ -421,15 +345,6 @@ cmd_show() {
 
 
 
-cmd_find() {
-	[[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
-	IFS="," eval 'echo "Search Terms: $*"'
-	local terms="*$(printf '%s*|*' "$@")"
-	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" 3>&- | tail -n +2 | sed -E 's/\.gpg(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
-}
-
-
-
 
 cmd_find() {
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find pass-names..."
@@ -449,112 +364,6 @@ cmd_find() {
 	$GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
 
-
-
-
-
-
-cmd_insert() {
-	local opts multiline=0 noecho=1 force=0
-	opts="$($GETOPT -o mef -l multiline,echo,force -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-m|--multiline) multiline=1; shift ;;
-		-e|--echo) noecho=0; shift ;;
-		-f|--force) force=1; shift ;;
-		--) shift; break ;;
-	esac done
-
-	[[ $err -ne 0 || ( $multiline -eq 1 && $noecho -eq 0 ) || $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--echo,-e | --multiline,-m] [--force,-f] pass-name"
-	local path="${1%/}"
-	local passfile="$PREFIX/$path.gpg"
-	check_sneaky_paths "$path"
-	set_git "$passfile"
-
-	[[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
-
-	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-
-	if [[ $multiline -eq 1 ]]; then
-		echo "Enter contents of $path and press Ctrl+D when finished:"
-		echo
-		$GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-	elif [[ $noecho -eq 1 ]]; then
-		local password password_again
-		while true; do
-			read -r -p "Enter password for $path: " -s password || exit 1
-			echo
-			read -r -p "Retype password for $path: " -s password_again || exit 1
-			echo
-			if [[ $password == "$password_again" ]]; then
-				echo "$password" | $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-				break
-			else
-				die "Error: the entered passwords do not match."
-			fi
-		done
-	else
-		local password
-		read -r -p "Enter password for $path: " -e password
-		echo "$password" | $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-	fi
-	git_add_file "$passfile" "Add given password for $path to store."
-}
-
-
-
-cmd_insert() {
-	[[ $# -ne 1 ]] && die "Usage: $PROGRAM insert pass-name"
-
-	local path="$1"
-	check_sneaky_paths "$path"
-
-	# 1. Map Lookup
-	local filename
-	filename=$(get_filename_from_alias "$path")
-	local is_new=0
-
-	if [[ -n "$filename" ]]; then
-		echo -e "\e[93mWARNING: An entry already exists for '$path'.\e[0m"
-		echo "Proceeding will overwrite the existing password. Press Ctrl+C to abort."
-		echo
-	else
-		filename=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
-		is_new=1
-	fi
-
-	local passfile="$PREFIX/$filename.gpg"
-
-	# 2. Strict Double-Prompt
-	local password password_again
-	while true; do
-		read -r -p "Enter password for $path: " -s password || exit 1
-		echo
-		read -r -p "Retype password for $path: " -s password_again || exit 1
-		echo
-		if [[ "$password" == "$password_again" ]]; then
-			# Encrypt directly
-			echo "$password" | $GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-			break
-		else
-			echo "Error: the entered passwords do not match."
-		fi
-	done
-
-	git_add_file "$passfile" "Add password for $path to store."
-
-	# 3. Update Map (Only if new)
-	if [[ $is_new -eq 1 ]]; then
-		local map_file="$PREFIX/$MAP_NAME.gpg"
-		local map_content=""
-		[[ -f "$map_file" ]] && map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null)
-		
-		# Append and re-encrypt
-		echo -e "${map_content}\n${path}:${filename}" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
-		git_add_file "$map_file" "Update map with alias $path."
-	fi
-}
 
 
 
@@ -628,7 +437,7 @@ cmd_insert() {
 
 	# 3. Encrypt and Save
 	echo "$password" | $GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-	git_add_file "$passfile" "Add/Update password for $path."
+	git_add_file "$passfile" "Update $filename."
 
 	# 4. Update Map (Only if new)
 	if [[ $is_new -eq 1 ]]; then
@@ -637,42 +446,9 @@ cmd_insert() {
 		[[ -f "$map_file" ]] && map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null)
 		
 		echo -e "${map_content}\n${path}:${filename}" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
-		git_add_file "$map_file" "Update map with alias $path."
+		git_add_file "$map_file" "Update map with $filename."
 	fi
 }
-
-
-
-
-
-
-
-cmd_edit() {
-	[[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND pass-name"
-
-	local path="${1%/}"
-	check_sneaky_paths "$path"
-	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-	local passfile="$PREFIX/$path.gpg"
-	set_git "$passfile"
-
-	tmpdir #Defines $SECURE_TMPDIR
-	local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")-${path//\//-}.txt"
-
-	local action="Add"
-	if [[ -f $passfile ]]; then
-		$GPG -d -o "$tmp_file" "${GPG_OPTS[@]}" "$passfile" || exit 1
-		action="Edit"
-	fi
-	${EDITOR:-vi} "$tmp_file"
-	[[ -f $tmp_file ]] || die "New password not saved."
-	$GPG -d -o - "${GPG_OPTS[@]}" "$passfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password unchanged."
-	while ! $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile" "${GPG_OPTS[@]}" "$tmp_file"; do
-		yesno "GPG encryption failed. Would you like to try again?"
-	done
-	git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
-}
-
 
 
 
@@ -708,46 +484,9 @@ cmd_edit() {
 	$GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" "$tmp_file" || die "Password encryption failed."
 	
 	# 4. Version Control
-	git_add_file "$passfile" "Edit password for $path using ${EDITOR:-vi}."
+	git_add_file "$passfile" "Update $filename."
 }
 
-
-
-
-
-
-
-cmd_delete() {
-	local opts recursive="" force=0
-	opts="$($GETOPT -o rf -l recursive,force -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-r|--recursive) recursive="-r"; shift ;;
-		-f|--force) force=1; shift ;;
-		--) shift; break ;;
-	esac done
-	[[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--recursive,-r] [--force,-f] pass-name"
-	local path="$1"
-	check_sneaky_paths "$path"
-
-	local passdir="$PREFIX/${path%/}"
-	local passfile="$PREFIX/$path.gpg"
-	[[ -f $passfile && -d $passdir && $path == */ || ! -f $passfile ]] && passfile="${passdir%/}/"
-	[[ -e $passfile ]] || die "Error: $path is not in the password store."
-	set_git "$passfile"
-
-	[[ $force -eq 1 ]] || yesno "Are you sure you would like to delete $path?"
-
-	rm $recursive -f -v "$passfile"
-	set_git "$passfile"
-	if [[ -n $INNER_GIT_DIR && ! -e $passfile ]]; then
-		git -C "$INNER_GIT_DIR" rm -qr "$passfile"
-		set_git "$passfile"
-		git_commit "Remove $path from store."
-	fi
-	rmdir -p "${passfile%/*}" 2>/dev/null
-}
 
 
 
@@ -820,38 +559,6 @@ cmd_git() {
 		die "Error: the password store is not a git repository. Try \"$PROGRAM git init\"."
 	fi
 }
-
-
-
-
-
-
-cmd_git() {
-	set_git "$PREFIX/"
-	if [[ $1 == "init" ]]; then
-		INNER_GIT_DIR="$PREFIX"
-		git -C "$INNER_GIT_DIR" "$@" || exit 1
-		
-		# Attributes for transparent GPG diffing
-		echo '*.gpg diff=gpg' > "$PREFIX/.gitattributes"
-		git -C "$INNER_GIT_DIR" add ".gitattributes"
-		git_commit "Configure git repository for gpg file diff."
-		
-		# Configure the diff engine to use your GPG settings
-		git -C "$INNER_GIT_DIR" config --local diff.gpg.binary true
-		git -C "$INNER_GIT_DIR" config --local diff.gpg.textconv "$GPG -d ${GPG_OPTS[*]}"
-	elif [[ -n "$INNER_GIT_DIR" ]]; then
-		# Secure temp dir for git operations (like merges/diffs)
-		tmpdir nowarn 
-		export TMPDIR="$SECURE_TMPDIR"
-		git -C "$INNER_GIT_DIR" "$@"
-	else
-		die "Error: the password store is not a git repository. Try \"$PROGRAM git init\"."
-	fi
-}
-
-
-
 
 
 
