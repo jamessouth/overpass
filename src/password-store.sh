@@ -173,6 +173,18 @@ BASE64="base64"
 cmd_version() {
 	cat <<-_EOF
 	============================================
+	=   overpass: GNU/Linux password manager   =
+	=                                          =
+	=                  v1.0.0                  =
+	=                                          =
+	=                James South               =
+	=                                          =
+	=  https://github.com/jamessouth/overpass  =
+	============================================
+
+	                   fork of
+
+	============================================
 	= pass: the standard unix password manager =
 	=                                          =
 	=                  v1.7.4                  =
@@ -185,30 +197,27 @@ cmd_version() {
 	_EOF
 }
 
+
 cmd_usage() {
 	cmd_version
 	echo
 	cat <<-_EOF
 	Usage:
-	    $PROGRAM init [--path=subfolder,-p subfolder] gpg-id...
+	    $PROGRAM init gpg-id
 	        Initialize new password storage and use gpg-id for encryption.
-	        Selectively reencrypt existing passwords using new gpg-id.
-	    $PROGRAM [ls] [subfolder]
-	        List passwords.
-	    $PROGRAM find pass-names...
-	    	List passwords that match pass-names.
-	    $PROGRAM [show] [--clip[=line-number],-c[line-number]] pass-name
+	    $PROGRAM find names...
+	    	List passwords that match names.
+	    $PROGRAM [show] [--clip,-c] [name]
 	        Show existing password and optionally put it on the clipboard.
 	        If put on the clipboard, it will be cleared in $CLIP_TIME seconds.
-	    $PROGRAM grep [GREPOPTIONS] search-string
-	        Search for password files containing search-string when decrypted.
-	    $PROGRAM insert [--echo,-e | --multiline,-m] [--force,-f] pass-name
-	        Insert new password. Optionally, echo the password back to the console
+		If name omitted, list all passwords.
+	    $PROGRAM insert [--clip,-c] [--generate,-g] name [pass-length]
+	        Insert a new password. Optionally, echo the password back to the console
 	        during entry. Or, optionally, the entry may be multiline. Prompt before
 	        overwriting existing password unless forced.
 	    $PROGRAM edit pass-name
 	        Insert a new password or edit an existing password using ${EDITOR:-vi}.
-	    $PROGRAM generate [--no-symbols,-n] [--clip,-c] [--in-place,-i | --force,-f] pass-name [pass-length]
+	    $PROGRAM generate [--no-symbols,-n]  [--in-place,-i | --force,-f] pass-name 
 	        Generate a new password of pass-length (or $GENERATED_LENGTH if unspecified) with optionally no symbols.
 	        Optionally put it on the clipboard and clear board after $CLIP_TIME seconds.
 	        Prompt before overwriting existing password unless forced.
@@ -232,10 +241,8 @@ cmd_usage() {
 }
 
 
-
-
-
 cmd_init() {
+#{{{
     [[ $# -ne 1 ]] && die "Usage: $PROGRAM init <gpg-id>"
     local new_key="$1"
     local gpg_id_file="$PREFIX/.gpg-id"
@@ -256,12 +263,11 @@ cmd_init() {
     
     echo "Password store initialized for $new_key"
 }
-
-
-
+#}}}
 
 
 cmd_show_aliases() {
+#{{{
     local map_file="$PREFIX/$MAP_NAME.gpg"
     if [[ -f "$map_file" ]]; then
         echo "Password Store (Mapped Aliases):"
@@ -273,13 +279,11 @@ cmd_show_aliases() {
         find "$PREFIX" -maxdepth 1 -name "*.gpg" -not -name "$MAP_NAME.gpg" | sed "s|^$PREFIX/||; s|\.gpg$||"
     fi
 }
-
-
-
-
+#}}}
 
 
 get_filename_from_alias() {
+#{{{
     local alias="$1"
     local map_file="$PREFIX/$MAP_NAME.gpg"
     [[ -f "$map_file" ]] || return 1
@@ -287,13 +291,11 @@ get_filename_from_alias() {
     # Decrypt map, find line starting with alias, extract the part after the colon
     $GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep "^${alias}:" | cut -d':' -f2
 }
-
-
-
-
+#}}}
 
 
 cmd_show() {
+#{{{
 	local opts clip=0
 	# Removed q:: and c:: (optional line numbers), now it's just a simple toggle
 	opts="$($GETOPT -o c -l clip -n "$PROGRAM" -- "$@")"
@@ -339,14 +341,11 @@ cmd_show() {
 		die "Error: $path mapped to $filename.gpg, but the file is missing."
 	fi
 }
-
-
-
-
-
+#}}}
 
 
 cmd_find() {
+#{{{
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find pass-names..."
 	
 	local map_file="$PREFIX/$MAP_NAME.gpg"
@@ -363,9 +362,7 @@ cmd_find() {
 	# Decrypt the map, search case-insensitively for the terms, grab just the alias, and format it
 	$GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
-
-
-
+#}}}
 
 
 cmd_insert() {
@@ -574,9 +571,8 @@ case "$1" in
 	init) shift;			cmd_init "$@" ;;
 	help|--help) shift;		cmd_usage "$@" ;;
 	version|--version) shift;	cmd_version "$@" ;;
-	show|ls|list) shift;		cmd_show "$@" ;;
+	show) shift;			cmd_show "$@" ;;
 	find|search) shift;		cmd_find "$@" ;;
-	grep) shift;			cmd_grep "$@" ;;
 	insert|add) shift;		cmd_insert "$@" ;;
 	edit) shift;			cmd_edit "$@" ;;
 	generate) shift;		cmd_generate "$@" ;;
