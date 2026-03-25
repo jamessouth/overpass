@@ -84,6 +84,7 @@ check_sneaky_paths() {
 #
 
 clip() {
+#{{{
 	if [[ -n $WAYLAND_DISPLAY ]] && command -v wl-copy &> /dev/null; then
 		local copy_cmd=( wl-copy )
 		local paste_cmd=( wl-paste -n )
@@ -125,9 +126,11 @@ clip() {
 	) >/dev/null 2>&1 & disown
 	echo "Copied $2 to clipboard. Will clear in $CLIP_TIME seconds."
 }
+#}}}
 
 
 tmpdir() {
+#{{{
 	[[ -n $SECURE_TMPDIR ]] && return
 	local warn=1
 	[[ $1 == "nowarn" ]] && warn=0
@@ -156,6 +159,8 @@ tmpdir() {
 	fi
 
 }
+#}}}
+
 GETOPT="getopt"
 SHRED="shred -f -z"
 BASE64="base64"
@@ -171,6 +176,7 @@ BASE64="base64"
 #
 
 cmd_version() {
+#{{{
 	cat <<-_EOF
 	============================================
 	=   overpass: GNU/Linux password manager   =
@@ -196,6 +202,7 @@ cmd_version() {
 	============================================
 	_EOF
 }
+#}}}
 
 
 cmd_usage() {
@@ -344,6 +351,46 @@ cmd_show() {
 #}}}
 
 
+
+
+
+cmd_show() {
+    # No getopt needed at all anymore!
+    if [[ $# -eq 0 ]]; then
+        cmd_show_aliases # Calls your custom ls/find function
+        return 0
+    elif [[ $# -ne 1 ]]; then
+        die "Usage: $PROGRAM show [pass-name]"
+    fi
+
+    local path="$1"
+    check_sneaky_paths "$path"
+
+    # Translate alias to obfuscated filename
+    local filename
+    filename=$(get_filename_from_alias "$path")
+    
+    [[ -z "$filename" ]] && die "Error: $path is not in the password store."
+
+    local passfile="$PREFIX/$filename.gpg"
+
+    if [[ -f "$passfile" ]]; then
+        local pass
+        # Extract strictly the first line and send it straight to the clipboard
+        pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | head -n 1)" || exit $?
+        [[ -n "$pass" ]] || die "There is no password to put on the clipboard."
+        
+        # The clip function natively echoes the confirmation message
+        clip "$pass" "$path"
+    else
+        die "Error: $path mapped to $filename.gpg, but the file is missing."
+    fi
+}
+
+
+
+
+
 cmd_find() {
 #{{{
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find pass-names..."
@@ -447,6 +494,80 @@ cmd_insert() {
 	fi
 }
 
+
+
+
+cmd_insert() {
+	local opts generate=0 passphrase=0
+	opts="$($GETOPT -o gp -l generate,passphrase -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-g|--generate) generate=1; shift ;;
+		-p|--passphrase) passphrase=1; shift ;;
+		--) shift; break ;;
+	esac done
+
+	[[ $generate -eq 1 && $passphrase -eq 1 ]] && die "Error: -g and -p are mutually exclusive."
+	
+	# Enforcement: If -p is used, we REQUIRE 2 arguments (path and word-count)
+	if [[ $passphrase -eq 1 ]]; then
+		[[ $# -ne 2 ]] && die "Usage: $PROGRAM insert -p pass-name word-count"
+	else
+		[[ $# -lt 1 || $# -gt 2 ]] && die "Usage: $PROGRAM insert [-g] pass-name [length]"
+	fi
+
+	local path="$1"
+	local count="$2"
+	check_sneaky_paths "$path"
+
+	# 1. Map Lookup & Ghost Filename (as before)
+	local filename=$(get_filename_from_alias "$path")
+	local is_new=0
+	if [[ -n "$filename" ]]; then
+		echo -e "\e[93mWARNING: Overwriting '$path'. Ctrl+C to abort.\e[0m"
+		[[ $generate -eq 1 || $passphrase -eq 1 ]] && read -r -p "Press Enter to proceed..."
+	else
+		filename=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
+		is_new=1
+	fi
+
+	local passfile="$PREFIX/$filename.gpg"
+	local password
+
+	# 2. Acquire Password
+	if [[ $generate -eq 1 ]]; then
+		local len="${count:-$GENERATED_LENGTH}"
+		password=$(LC_ALL=C tr -dc "${CHARACTER_SET:-a-zA-Z0-9}" < /dev/urandom | head -c "$len")
+	elif [[ $passphrase -eq 1 ]]; then
+		# No more "if count is set" checks—we know it is set or we would have died above
+		password=$(python3 "$PASSPHRASE_GEN_SCRIPT" "$count") || die "Python generator failed."
+	else
+		# Manual double-prompt logic...
+		while true; do
+			read -r -p "Enter password for $path: " -s password || exit 1
+			echo
+			read -r -p "Retype password for $path: " -s password_again || exit 1
+			echo
+			if [[ "$password" == "$password_again" ]]; then break; else echo "Error: passwords do not match."; fi
+		done
+	fi
+
+	# 3. Finalization (Clipboard, GPG, Map, Git)
+	clip "$password" "$path"
+	echo -n "$password" | $GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" || die "Encryption failed."
+	
+	# Using the "Ghost" commit style
+	git_add_file "$passfile" "Update $filename."
+
+	if [[ $is_new -eq 1 ]]; then
+		local map_file="$PREFIX/$MAP_NAME.gpg"
+		local map_content=""
+		[[ -f "$map_file" ]] && map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null)
+		echo -e "${map_content}\n${path}:${filename}" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
+		git_add_file "$map_file" "Update map."
+	fi
+}
 
 
 
