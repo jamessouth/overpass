@@ -274,6 +274,7 @@ gpg_base() {
 
 
 cmd_show() {
+#{{{
     if [[ $# -eq 0 ]]; then
 	echo "Overpass Store"
 	gpg_base | cut -d':' -f1 | sort | sed 's/^/├── /'
@@ -297,28 +298,17 @@ cmd_show() {
         die "Error: $path mapped to $filename.gpg, but the file is missing."
     fi
 }
-
+#}}}
 
 
 
 
 cmd_find() {
 #{{{
-	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find pass-names..."
-	
-	local map_file="$PREFIX/$MAP_NAME.gpg"
-	[[ ! -f "$map_file" ]] && die "Error: Password store map is empty or missing."
-
-	# Print the search terms nicely, like the original
-	IFS="," eval 'echo "Search Terms: $*"'
-
-	# Build a regex pattern from the arguments (e.g., "term1|term2|term3")
+	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find names..."
 	local IFS="|"
 	local pattern="$*"
-
-	echo "Matching Aliases:"
-	# Decrypt the map, search case-insensitively for the terms, grab just the alias, and format it
-	$GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
+	gpg_base | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
 #}}}
 
