@@ -58,12 +58,6 @@ git_commit() {
 	[[ $(git -C "$INNER_GIT_DIR" config --bool --get pass.signcommits) == "true" ]] && sign="-S"
 	git -C "$INNER_GIT_DIR" commit $sign -m "$1"
 }
-yesno() {
-	[[ -t 0 ]] || return 0
-	local response
-	read -r -p "$1 [y/N] " response
-	[[ $response == [yY] ]] || exit 1
-}
 die() {
 	echo "$@" >&2
 	exit 1
@@ -142,14 +136,14 @@ tmpdir() {
 		}
 		trap remove_tmpfile EXIT
 	else
-		[[ $warn -eq 1 ]] && yesno "$(cat <<-_EOF
-		Your system does not have /dev/shm, which means that it may
-		be difficult to entirely erase the temporary non-encrypted
-		password file after editing.
-
-		Are you sure you would like to continue?
-		_EOF
-		)"
+		[[ $warn -eq 1 ]] && {
+			echo -en "\e[33mWARNING\e[0m" >&2
+			cat <<-_EOF >&2
+			: Your system does not have /dev/shm, which means that it may
+			be difficult to entirely erase the temporary non-encrypted
+			password file after editing.
+			_EOF
+		}
 		SECURE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/$template")"
 		shred_tmpfile() {
 			find "$SECURE_TMPDIR" -type f -exec $SHRED {} +
@@ -157,7 +151,6 @@ tmpdir() {
 		}
 		trap shred_tmpfile EXIT
 	fi
-
 }
 #}}}
 
@@ -272,23 +265,6 @@ cmd_init() {
 }
 #}}}
 
-
-cmd_show_aliases() {
-#{{{
-    local map_file="$PREFIX/$MAP_NAME.gpg"
-    if [[ -f "$map_file" ]]; then
-        echo "Password Store (Mapped Aliases):"
-        # Decrypt the map, extract just the alias (the part before the colon)
-        $GPG "${GPG_OPTS[@]}" -d "$map_file" 2>/dev/null | cut -d':' -f1 | sort | sed 's/^/├── /'
-    else
-        echo "Password Store (No map found):"
-        # Fallback to just listing the .gpg files if no map exists
-        find "$PREFIX" -maxdepth 1 -name "*.gpg" -not -name "$MAP_NAME.gpg" | sed "s|^$PREFIX/||; s|\.gpg$||"
-    fi
-}
-#}}}
-
-
 get_filename_from_alias() {
 #{{{
     local alias="$1"
@@ -301,63 +277,13 @@ get_filename_from_alias() {
 #}}}
 
 
-cmd_show() {
-#{{{
-	local opts clip=0
-	# Removed q:: and c:: (optional line numbers), now it's just a simple toggle
-	opts="$($GETOPT -o c -l clip -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-c|--clip) clip=1; shift ;;
-		--) shift; break ;;
-	esac done
-
-	[[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [--clip,-c] [pass-name]"
-
-	local path="$1"
-	
-	# If no alias is provided, list the mapped aliases
-	if [[ -z "$path" ]]; then
-		cmd_show_aliases # Calls the ls function we drafted earlier
-		return 0
-	fi
-
-	check_sneaky_paths "$path"
-
-	# Translate the human-readable alias to the obfuscated filename
-	local filename=$(get_filename_from_alias "$path")
-	
-	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
-
-	local passfile="$PREFIX/$filename.gpg"
-
-	if [[ -f "$passfile" ]]; then
-		if [[ $clip -eq 0 ]]; then
-			# Output the entire decrypted file directly to the terminal
-			$GPG -d "${GPG_OPTS[@]}" "$passfile" || exit $?
-		else
-			# Extract only the first line for the clipboard
-			local pass
-			pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | head -n 1)" || exit $?
-			[[ -n "$pass" ]] || die "There is no password to put on the clipboard."
-			clip "$pass" "$path"
-		fi
-	else
-		# Failsafe in case the map has an entry but the file was manually deleted
-		die "Error: $path mapped to $filename.gpg, but the file is missing."
-	fi
-}
-#}}}
-
-
-
 
 
 cmd_show() {
     # No getopt needed at all anymore!
     if [[ $# -eq 0 ]]; then
-        cmd_show_aliases # Calls your custom ls/find function
+	echo "Password Store"
+        $GPG "${GPG_OPTS[@]}" -d "$PREFIX/$MAP_NAME.gpg" 2>/dev/null | cut -d':' -f1 | sort | sed 's/^/├── /'
         return 0
     elif [[ $# -ne 1 ]]; then
         die "Usage: $PROGRAM show [pass-name]"
@@ -410,91 +336,6 @@ cmd_find() {
 	$GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
 #}}}
-
-
-cmd_insert() {
-	local opts generate=0 clip=0 length="${GENERATED_LENGTH:-24}"
-	opts="$($GETOPT -o gc -l generate,clip -n "$PROGRAM" -- "$@")"
-	local err=$?
-	eval set -- "$opts"
-	while true; do case $1 in
-		-g|--generate) generate=1; shift ;;
-		-c|--clip) clip=1; shift ;;
-		--) shift; break ;;
-	esac done
-
-	# Accepts an optional length argument if generating
-	[[ $err -ne 0 || $# -lt 1 || $# -gt 2 ]] && die "Usage: $PROGRAM insert [-g] [-c] pass-name [length]"
-
-	local path="$1"
-	[[ -n "$2" ]] && length="$2"
-	check_sneaky_paths "$path"
-
-	[[ $length =~ ^[0-9]+$ && $length -gt 0 ]] || die "Error: pass-length \"$length\" must be a valid number."
-
-	# 1. Map Lookup
-	local filename
-	filename=$(get_filename_from_alias "$path")
-	local is_new=0
-
-	if [[ -n "$filename" ]]; then
-		echo -e "\e[93mWARNING: An entry already exists for '$path'.\e[0m"
-		if [[ $generate -eq 1 ]]; then
-			# Pause for the user if we are about to auto-generate over an existing file
-			read -r -p "Press Enter to generate and OVERWRITE, or Ctrl+C to abort..."
-		else
-			echo "Proceeding will overwrite the existing password. Press Ctrl+C to abort."
-			echo
-		fi
-	else
-		filename=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
-		is_new=1
-	fi
-
-	local passfile="$PREFIX/$filename.gpg"
-	local password password_again
-
-	# 2. Acquire Password (Generate vs Prompt)
-	if [[ $generate -eq 1 ]]; then
-		# Assuming $CHARACTER_SET is defined at the top of your script like the original
-		read -r -n $length password < <(LC_ALL=C tr -dc "${CHARACTER_SET:-a-zA-Z0-9!@#$%^&*()_+{}|:<>?=}" < /dev/urandom)
-		[[ ${#password} -eq $length ]] || die "Could not generate password."
-		
-		if [[ $clip -eq 1 ]]; then
-			clip "$password" "$path"
-		else
-			printf "\e[1mThe generated password for \e[4m%s\e[24m is:\e[0m\n\e[1m\e[93m%s\e[0m\n" "$path" "$password"
-		fi
-	else
-		while true; do
-			read -r -p "Enter password for $path: " -s password || exit 1
-			echo
-			read -r -p "Retype password for $path: " -s password_again || exit 1
-			echo
-			if [[ "$password" == "$password_again" ]]; then
-				break
-			else
-				echo "Error: the entered passwords do not match."
-			fi
-		done
-	fi
-
-	# 3. Encrypt and Save
-	echo "$password" | $GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" || die "Password encryption aborted."
-	git_add_file "$passfile" "Update $filename."
-
-	# 4. Update Map (Only if new)
-	if [[ $is_new -eq 1 ]]; then
-		local map_file="$PREFIX/$MAP_NAME.gpg"
-		local map_content=""
-		[[ -f "$map_file" ]] && map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null)
-		
-		echo -e "${map_content}\n${path}:${filename}" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
-		git_add_file "$map_file" "Update map with $filename."
-	fi
-}
-
-
 
 
 cmd_insert() {

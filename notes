@@ -11,11 +11,10 @@ remove set_gpg_recipients(), reencrypt_path(), non-linux platform support
 
 remove select line option, cmd_grep()
 
-
 remove echo, force, and multiline flags from insert, remove 
 cmd_generate(), merge generate into insert 
 
-
+remove clip flag from show and insert(generate), remove yesno, change missing /dev/shm from prompt to warning in tmpdir()
 
 
 
