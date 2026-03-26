@@ -265,48 +265,33 @@ cmd_init() {
 }
 #}}}
 
-get_filename_from_alias() {
-#{{{
-    local alias="$1"
-    local map_file="$PREFIX/$MAP_NAME.gpg"
-    [[ -f "$map_file" ]] || return 1
-    
-    # Decrypt map, find line starting with alias, extract the part after the colon
-    $GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep "^${alias}:" | cut -d':' -f2
+
+gpg_base() {
+    $GPG "${GPG_OPTS[@]}" -d "$PREFIX/$MAP_NAME.gpg" 2>/dev/null
 }
-#}}}
 
 
 
 
 cmd_show() {
-    # No getopt needed at all anymore!
     if [[ $# -eq 0 ]]; then
-	echo "Password Store"
-        $GPG "${GPG_OPTS[@]}" -d "$PREFIX/$MAP_NAME.gpg" 2>/dev/null | cut -d':' -f1 | sort | sed 's/^/├── /'
+	echo "Overpass Store"
+	gpg_base | cut -d':' -f1 | sort | sed 's/^/├── /'
         return 0
     elif [[ $# -ne 1 ]]; then
-        die "Usage: $PROGRAM show [pass-name]"
+        die "Usage: $PROGRAM show [name]"
     fi
 
     local path="$1"
     check_sneaky_paths "$path"
 
-    # Translate alias to obfuscated filename
-    local filename
-    filename=$(get_filename_from_alias "$path")
-    
-    [[ -z "$filename" ]] && die "Error: $path is not in the password store."
+    local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
+    [[ -z "$filename" ]] && die "Error: $path is not in the overpass store."
 
-    local passfile="$PREFIX/$filename.gpg"
-
-    if [[ -f "$passfile" ]]; then
-        local pass
-        # Extract strictly the first line and send it straight to the clipboard
-        pass="$($GPG -d "${GPG_OPTS[@]}" "$passfile" | head -n 1)" || exit $?
-        [[ -n "$pass" ]] || die "There is no password to put on the clipboard."
-        
-        # The clip function natively echoes the confirmation message
+    local overpassfile="$PREFIX/$filename.gpg"
+    if [[ -f "$overpassfile" ]]; then
+        local pass="$($GPG -d "${GPG_OPTS[@]}" "$overpassfile" | head -n 1)" || exit $?
+        [[ -n "$pass" ]] || die "Error: $path mapped to $filename.gpg, but there is no password."
         clip "$pass" "$path"
     else
         die "Error: $path mapped to $filename.gpg, but the file is missing."
@@ -363,7 +348,7 @@ cmd_insert() {
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup & Ghost Filename (as before)
-	local filename=$(get_filename_from_alias "$path")
+	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
 	local is_new=0
 	if [[ -n "$filename" ]]; then
 		echo -e "\e[93mWARNING: Overwriting '$path'. Ctrl+C to abort.\e[0m"
@@ -419,7 +404,7 @@ cmd_edit() {
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup
-	local filename=$(get_filename_from_alias "$path")
+	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
 	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
 
 	local passfile="$PREFIX/$filename.gpg"
@@ -457,7 +442,7 @@ cmd_delete() {
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup: Identify the ghost file
-	local filename=$(get_filename_from_alias "$path")
+	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
 	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
 
 	local passfile="$PREFIX/$filename.gpg"
