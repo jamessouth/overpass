@@ -18,7 +18,7 @@ CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
 GENERATED_LENGTH="${PASSWORD_STORE_GENERATED_LENGTH:-25}"
 CHARACTER_SET="${PASSWORD_STORE_CHARACTER_SET:-[:punct:][:alnum:]}"
 CHARACTER_SET_NO_SYMBOLS="${PASSWORD_STORE_CHARACTER_SET_NO_SYMBOLS:-[:alnum:]}"
-
+PASSPHRASE_GEN_SCRIPT="../genphrase.py"
 
 
 
@@ -316,7 +316,6 @@ cmd_find() {
 cmd_insert() {
 	local opts generate=0 passphrase=0
 	opts="$($GETOPT -o gp -l generate,passphrase -n "$PROGRAM" -- "$@")"
-	local err=$?
 	eval set -- "$opts"
 	while true; do case $1 in
 		-g|--generate) generate=1; shift ;;
@@ -324,14 +323,10 @@ cmd_insert() {
 		--) shift; break ;;
 	esac done
 
-	[[ $generate -eq 1 && $passphrase -eq 1 ]] && die "Error: -g and -p are mutually exclusive."
+	[[ $generate -eq 1 && $passphrase -eq 1 ]] && die "Error: insert called with both -g and -p flags."
+	[[ $passphrase -eq 1 && $# -ne 2 ]] && die "Usage: $PROGRAM insert -p name word-count"
+	[[ $# -lt 1 || $# -gt 2 ]] && die "Usage: $PROGRAM insert [-g] name [length]"
 	
-	# Enforcement: If -p is used, we REQUIRE 2 arguments (path and word-count)
-	if [[ $passphrase -eq 1 ]]; then
-		[[ $# -ne 2 ]] && die "Usage: $PROGRAM insert -p pass-name word-count"
-	else
-		[[ $# -lt 1 || $# -gt 2 ]] && die "Usage: $PROGRAM insert [-g] pass-name [length]"
-	fi
 
 	local path="$1"
 	local count="$2"
@@ -341,7 +336,7 @@ cmd_insert() {
 	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
 	local is_new=0
 	if [[ -n "$filename" ]]; then
-		echo -e "\e[93mWARNING: Overwriting '$path'. Ctrl+C to abort.\e[0m"
+		echo -e "\e[33mWARNING\e[0m: This will overwrite '$path'. Press Ctrl+C to abort."
 		[[ $generate -eq 1 || $passphrase -eq 1 ]] && read -r -p "Press Enter to proceed..."
 	else
 		filename=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
@@ -353,20 +348,13 @@ cmd_insert() {
 
 	# 2. Acquire Password
 	if [[ $generate -eq 1 ]]; then
-		local len="${count:-$GENERATED_LENGTH}"
-		password=$(LC_ALL=C tr -dc "${CHARACTER_SET:-a-zA-Z0-9}" < /dev/urandom | head -c "$len")
+		read -r -n "${count:-$GENERATED_LENGTH}" password < <(LC_ALL=C tr -dc "$CHARACTER_SET" < /dev/urandom)
 	elif [[ $passphrase -eq 1 ]]; then
-		# No more "if count is set" checks—we know it is set or we would have died above
-		password=$(python3 "$PASSPHRASE_GEN_SCRIPT" "$count") || die "Python generator failed."
+		password=$("$PASSPHRASE_GEN_SCRIPT" "$count") || die "Error: Passphrase generation error."
 	else
-		# Manual double-prompt logic...
-		while true; do
-			read -r -p "Enter password for $path: " -s password || exit 1
-			echo
-			read -r -p "Retype password for $path: " -s password_again || exit 1
-			echo
-			if [[ "$password" == "$password_again" ]]; then break; else echo "Error: passwords do not match."; fi
-		done
+		read -r -p "Enter password for $path: " -s password; echo
+		read -r -p "Retype password: " -s password_again; echo
+		[[ "$password" == "$password_again" ]] || die "Passwords do not match."
 	fi
 
 	# 3. Finalization (Clipboard, GPG, Map, Git)
