@@ -266,10 +266,15 @@ cmd_init() {
 #}}}
 
 
-gpg_base() {
-    $GPG "${GPG_OPTS[@]}" -d "$PREFIX/$MAP_NAME.gpg" 2>/dev/null
+
+gpg_dc() {
+	$GPG -d "${GPG_OPTS[@]}" "$@"
 }
 
+
+decrypt_map() {
+	gpg_dc "$PREFIX/$MAP_NAME.gpg" 2>/dev/null
+}
 
 
 
@@ -277,7 +282,7 @@ cmd_show() {
 #{{{
     if [[ $# -eq 0 ]]; then
 	echo "Overpass Store"
-	gpg_base | cut -d':' -f1 | sort | sed 's/^/├── /'
+	decrypt_map | cut -d':' -f1 | sort | sed 's/^/├── /'
         return 0
     elif [[ $# -ne 1 ]]; then
         die "Usage: $PROGRAM show [name]"
@@ -286,12 +291,12 @@ cmd_show() {
     local path="$1"
     check_sneaky_paths "$path"
 
-    local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
+    local filename=$(decrypt_map | grep "^${path}:" | cut -d':' -f2)
     [[ -z "$filename" ]] && die "Error: $path is not in the overpass store."
 
     local overpassfile="$PREFIX/$filename.gpg"
     if [[ -f "$overpassfile" ]]; then
-        local pass="$($GPG -d "${GPG_OPTS[@]}" "$overpassfile" | head -n 1)" || exit $?
+        local pass="$(gpg_dc "$overpassfile" | head -n 1)" || exit $?
         [[ -n "$pass" ]] || die "Error: $path mapped to $filename.gpg, but there is no password."
         clip "$pass" "$path"
     else
@@ -308,7 +313,7 @@ cmd_find() {
 	[[ $# -eq 0 ]] && die "Usage: $PROGRAM find names..."
 	local IFS="|"
 	local pattern="$*"
-	gpg_base | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
+	decrypt_map | grep -iE "$pattern" | cut -d':' -f1 | sort | sed 's/^/├── /'
 }
 #}}}
 
@@ -328,12 +333,11 @@ cmd_insert() {
 	[[ $# -lt 1 || $# -gt 2 ]] && die "Usage: $PROGRAM insert [-g] name [length]"
 	
 
-	local path="$1"
-	local count="$2"
+	local path="$1" count="$2"
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup & Ghost Filename (as before)
-	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
+	local filename=$(decrypt_map | grep "^${path}:" | cut -d':' -f2)
 	local is_new=0
 	if [[ -n "$filename" ]]; then
 		echo -e "\e[33mWARNING\e[0m: This will overwrite '$path'. Press Ctrl+C to abort."
@@ -365,25 +369,25 @@ cmd_insert() {
 	git_add_file "$passfile" "Update $filename."
 
 	if [[ $is_new -eq 1 ]]; then
-		local map_file="$PREFIX/$MAP_NAME.gpg"
-		local map_content=""
-		[[ -f "$map_file" ]] && map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null)
-		echo -e "${map_content}\n${path}:${filename}" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
-		git_add_file "$map_file" "Update map."
+		{
+			decrypt_map
+			echo "${path}:${filename}"
+		} | grep -v '^$' | $GPG -e -r "$GPG_RECIPIENT" -o "$PREFIX/$MAP_NAME.gpg" "${GPG_OPTS[@]}"
+		git_add_file "$PREFIX/$MAP_NAME.gpg" "update map"
 	fi
 }
 
 
 
 cmd_edit() {
-	[[ $# -ne 1 ]] && die "Usage: $PROGRAM edit pass-name"
+	[[ $# -ne 1 ]] && die "Usage: $PROGRAM edit name"
 
-	local path="$1"
+	local path="${1%/}"
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup
-	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
-	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
+	local filename=$(decrypt_map | grep "^${path}:" | cut -d':' -f2)
+	[[ -z "$filename" ]] && die "Error: $path is not in the overpass store."
 
 	local passfile="$PREFIX/$filename.gpg"
 	[[ -f "$passfile" ]] || die "Error: $path mapped to $filename.gpg, but file is missing."
@@ -420,7 +424,7 @@ cmd_delete() {
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup: Identify the ghost file
-	local filename=$(gpg_base | grep "^${path}:" | cut -d':' -f2)
+	local filename=$(decrypt_map | grep "^${path}:" | cut -d':' -f2)
 	[[ -z "$filename" ]] && die "Error: $path is not in the password store."
 
 	local passfile="$PREFIX/$filename.gpg"
@@ -444,7 +448,7 @@ cmd_delete() {
 	if [[ -f "$map_file" ]]; then
 		local map_content
 		# Decrypt, filter out the line starting with our alias, and re-encrypt
-		map_content=$($GPG -d "${GPG_OPTS[@]}" "$map_file" 2>/dev/null | grep -v "^${path}:")
+		map_content=$(gpg_dc "$map_file" 2>/dev/null | grep -v "^${path}:")
 		echo "$map_content" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
 	fi
 
