@@ -16,7 +16,7 @@ cmd_generate(), merge generate into insert
 
 remove clip flag from show and insert(generate), remove yesno, change missing /dev/shm from prompt to warning in tmpdir()
 
-
+remove set_git()
 
 
 

@@ -29,6 +29,9 @@ GPG_RECIPIENT=$(head -n 1 "$GPG_ID_FILE")
 
 
 
+if git -C "$PREFIX" rev-parse --is-inside-work-tree &>/dev/null; then
+    INNER_GIT_DIR="$PREFIX"
+fi
 
 
 
@@ -39,13 +42,6 @@ export GIT_CEILING_DIRECTORIES="$PREFIX/.."
 # BEGIN helper functions
 #
 
-set_git() {
-    if [[ $(git -C "$PREFIX" rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
-        INNER_GIT_DIR="$PREFIX"
-    else
-        INNER_GIT_DIR=""
-    fi
-}
 git_add_file() {
 	[[ -n $INNER_GIT_DIR ]] || return
 	git -C "$INNER_GIT_DIR" add "$1" || return
@@ -255,7 +251,6 @@ cmd_init() {
     mkdir -p "$PREFIX"
     echo "$new_key" > "$gpg_id_file"
     
-    set_git
     if [[ -n $INNER_GIT_DIR ]]; then
         git -C "$INNER_GIT_DIR" add "$gpg_id_file"
         git_commit "Initialize password store with GPG ID $new_key"
@@ -275,6 +270,16 @@ gpg_dc() {
 decrypt_map() {
 	gpg_dc "$PREFIX/$MAP_NAME.gpg" 2>/dev/null
 }
+
+
+
+encrypt() {
+    local out="$1"
+    shift 
+    $GPG -e -r "$GPG_RECIPIENT" -o "$out" "${GPG_OPTS[@]}" "$@"
+}
+
+
 
 
 
@@ -363,7 +368,7 @@ cmd_insert() {
 
 	# 3. Finalization (Clipboard, GPG, Map, Git)
 	clip "$password" "$path"
-	echo -n "$password" | $GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" || die "Encryption failed."
+	echo -n "$password" | encrypt "$passfile" || die "Encryption failed."
 	
 	# Using the "Ghost" commit style
 	git_add_file "$passfile" "Update $filename."
@@ -372,7 +377,7 @@ cmd_insert() {
 		{
 			decrypt_map
 			echo "${path}:${filename}"
-		} | grep -v '^$' | $GPG -e -r "$GPG_RECIPIENT" -o "$PREFIX/$MAP_NAME.gpg" "${GPG_OPTS[@]}"
+		} | grep -v '^$' | encrypt "$PREFIX/$MAP_NAME.gpg" 
 		git_add_file "$PREFIX/$MAP_NAME.gpg" "update map"
 	fi
 }
@@ -405,9 +410,10 @@ cmd_edit() {
 	${EDITOR:-vi} "$tmp_file"
 	
 	# Check if the file was actually changed/saved
-	[[ -f "$tmp_file" ]] || die "Error: Temporary file disappeared."
+	[[ -f "$tmp_file" ]] || die "New password not saved."
+	$GPG -d -o - "${GPG_OPTS[@]}" "$passfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password unchanged."
 	
-	$GPG -e -r "$GPG_RECIPIENT" -o "$passfile" "${GPG_OPTS[@]}" "$tmp_file" || die "Password encryption failed."
+	encrypt "$passfile" "$tmp_file" || die "Password encryption failed."
 	
 	# 4. Version Control
 	git_add_file "$passfile" "Update $filename."
@@ -449,7 +455,7 @@ cmd_delete() {
 		local map_content
 		# Decrypt, filter out the line starting with our alias, and re-encrypt
 		map_content=$(gpg_dc "$map_file" 2>/dev/null | grep -v "^${path}:")
-		echo "$map_content" | sed '/^$/d' | $GPG -e -r "$GPG_RECIPIENT" -o "$map_file" "${GPG_OPTS[@]}"
+		echo "$map_content" | sed '/^$/d' | encrypt "$PREFIX/$MAP_NAME.gpg" 
 	fi
 
 	# 5. Git Integration
@@ -467,7 +473,6 @@ cmd_delete() {
 
 
 cmd_git() {
-	set_git "$PREFIX/"
 	if [[ $1 == "init" ]]; then
 		INNER_GIT_DIR="$PREFIX"
 		git -C "$INNER_GIT_DIR" "$@" || exit 1
