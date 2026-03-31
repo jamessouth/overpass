@@ -324,6 +324,7 @@ cmd_find() {
 
 
 cmd_insert() {
+#{{{
 	local opts generate=0 passphrase=0
 	opts="$($GETOPT -o gp -l generate,passphrase -n "$PROGRAM" -- "$@")"
 	eval set -- "$opts"
@@ -346,7 +347,7 @@ cmd_insert() {
 	local is_new=0
 	if [[ -n "$filename" ]]; then
 		echo -e "\e[33mWARNING\e[0m: This will overwrite '$path'. Press Ctrl+C to abort."
-		[[ $generate -eq 1 || $passphrase -eq 1 ]] && read -r -p "Press Enter to proceed..."
+		[[ $generate -eq 1 || $passphrase -eq 1 ]] && read -r -p "Press Enter to proceed."
 	else
 		filename=$(head /dev/urandom | tr -dc 'a-f0-9' | head -c 12)
 		is_new=1
@@ -381,10 +382,11 @@ cmd_insert() {
 		git_add_file "$PREFIX/$MAP_NAME.gpg" "update map"
 	fi
 }
-
+#}}}
 
 
 cmd_edit() {
+#{{{
 	[[ $# -ne 1 ]] && die "Usage: $PROGRAM edit name"
 
 	local path="${1%/}"
@@ -418,15 +420,15 @@ cmd_edit() {
 	# 4. Version Control
 	git_add_file "$passfile" "Update $filename."
 }
-
+#}}}
 
 
 
 
 cmd_delete() {
-	[[ $# -ne 1 ]] && die "Usage: $PROGRAM delete pass-name"
+	[[ $# -ne 1 ]] && die "Usage: $PROGRAM delete name"
 
-	local path="$1"
+	local path="${1%/}"
 	check_sneaky_paths "$path"
 
 	# 1. Map Lookup: Identify the ghost file
@@ -438,25 +440,17 @@ cmd_delete() {
 
 	# 2. Confirmation (The Arch Way)
 	# No -f flag. If they don't want to delete, they Ctrl+C.
-	echo -e "\e[91mDANGER: You are about to permanently delete '$path'.\e[0m"
-	read -r -p "Press Enter to confirm, or Ctrl+C to abort..."
+	echo -e "\e[33mWARNING\e[0m: This will delete '$path'."
+	read -r -p "Press Enter to confirm, or Ctrl+C to abort."
 
 	# 3. Physical Removal
-	# We use shred if available, otherwise rm -f
-	if command -v shred &>/dev/null; then
-		shred -u "$passfile"
-	else
-		rm -f "$passfile"
-	fi
+	rm -fv "$passfile"
 
 	# 4. Scrub the Map
-	local map_file="$PREFIX/$MAP_NAME.gpg"
-	if [[ -f "$map_file" ]]; then
-		local map_content
-		# Decrypt, filter out the line starting with our alias, and re-encrypt
-		map_content=$(gpg_dc "$map_file" 2>/dev/null | grep -v "^${path}:")
-		echo "$map_content" | sed '/^$/d' | encrypt "$PREFIX/$MAP_NAME.gpg" 
-	fi
+	decrypt_map | grep -v "^${path}:" | encrypt "$PREFIX/$MAP_NAME.gpg" 
+	git_add_file "$PREFIX/$MAP_NAME.gpg" "update map"
+
+
 
 	# 5. Git Integration
 	if [[ -n $INNER_GIT_DIR ]]; then
